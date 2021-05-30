@@ -1,0 +1,18 @@
+# to create a new environment use: conda env create -f environment.yml
+# to update a current environment use: conda env update -f environment.yml
+name: self-classifier
+channels:
+- pytorch
+- conda-forge
+- defaults
+dependencies:
+- python=3.8.6=hffdb5ce_4_cpython
+- numpy=1.19.5=py38h18fd61f_1
+- pip=21.0=pyhd8ed1ab_0
+- scikit-learn=0.24.1=py38h658cfdd_0
+- scikit-image=0.18.1=py38h51da96c_0
+- pytorch=1.7.1=py3.8_cuda11.0.221_cudnn8.0.5_0
+- torchvision=0.8.2=py38_cu110
+- cudatoolkit=11.0.3=h15472ef_6
+- pip:
+    - tensorboard==2.4.1
