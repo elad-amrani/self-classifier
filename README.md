@@ -2,6 +2,10 @@
 
 Official PyTorch implementation and pretrained models of the paper "Self-Supervised Classification Network". Self-Classifier is a self-supervised end-to-end classification neural network. It learns labels and representations simultaneously in a single-stage end-to-end manner.
 
+![](./graphics/Self-Classifier_arch.jpg "Self-Classifier Architecture")
+
+**Self-Classifier architecture**. Two augmented views of the same image are processed by a shared network. The cross-entropy of the two views is minimized to promote same class prediction while avoiding degenerate solutions by asserting a uniform prior. The resulting model learns representations and class labels in a single-stage end-to-end unsupervised manner. CNN: Convolutional Neural Network; FC: Fully Connected.
+
 ## Setup
 
 1. Install Conda environment:
