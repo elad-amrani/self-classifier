@@ -14,7 +14,7 @@ Implementation of the paper "Self-Supervised Classification Network". Self-Class
         pip install git+git://github.com/NVIDIA/apex.git@4a1aa97e31ca87514e17c3cd3bbc03f4204579d0 --install-option="--cuda_ext"         
 
 
-##Citation
+## Citation
 
 If you find this repository useful in your research, please cite:
 
