@@ -18,10 +18,10 @@ Implementation of the paper "Self-Supervised Classification Network". Self-Class
 
 If you find this repository useful in your research, please cite:
 
-@article{amrani2021self,
-  title={Self-Supervised Classification Network},
-  author={Amrani, Elad and Bronstein, Alex},
-  journal={arXiv preprint arXiv:2103.10994},
-  year={2021}
-}
+    @article{amrani2021self,
+      title={Self-Supervised Classification Network},
+      author={Amrani, Elad and Bronstein, Alex},
+      journal={arXiv preprint arXiv:2103.10994},
+      year={2021}
+    }
 
