@@ -28,11 +28,11 @@ class Loss(nn.Module):
 
             loss += loss_i
 
-            # debug
-            if idx == 0:
-                target = all_out2[idx].argmax(dim=1)
-                print('number of unique assignments (cls {}): {}'.format(idx, th.unique(target).shape[0]))
-                print('loss_0', loss_i)
+            # # debug
+            # if idx == 0:
+            #     target = all_out2[idx].argmax(dim=1)
+            #     print('number of unique assignments (cls {}): {}'.format(idx, th.unique(target).shape[0]))
+            #     print('loss_0', loss_i)
 
         loss /= len(all_out1)
 
