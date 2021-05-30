@@ -1,6 +1,6 @@
 # Self-Classifier: Self-Supervised Classification Network
 
-Official PyTorch implementation and pretrained models of the paper "Self-Supervised Classification Network". Self-Classifier is a self-supervised end-to-end classification neural network. It learns labels and representations simultaneously in a single-stage end-to-end manner.
+Official PyTorch implementation and pretrained models of the paper [Self-Supervised Classification Network](https://arxiv.org/abs/2103.10994). Self-Classifier is a self-supervised end-to-end classification neural network. It learns labels and representations simultaneously in a single-stage end-to-end manner.
 
 ![](./graphics/Self-Classifier_arch.jpg "Self-Classifier Architecture")
 
