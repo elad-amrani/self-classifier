@@ -55,6 +55,10 @@ For running K-nearest neighbor classifier on ImageNet validation set, run:
 
 #### Ablation study
 
+For training the 100-epoch ablation study baseline, run:
+
+        sbatch ./scripts/ablation/train_100ep.sh
+
 For training any of the ablation study runs presented in the paper, run:
 
         sbatch ./scripts/ablation/<ablation_name>/<ablation_script>.sh
