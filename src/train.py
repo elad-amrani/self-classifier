@@ -378,10 +378,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.rank == 0 or not args.distributed:
         writer = SummaryWriter(log_dir=args.save_path)
 
-    if args.use_amp:
-        scaler = GradScaler()
-    else:
-        scaler = None
+    scaler = GradScaler(enabled=args.use_amp)
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -437,11 +434,7 @@ def train(train_loader, model, scaler, criterion, optimizer, lr_schedule, epoch,
             batch_view1 = batch_view1.cuda(args.gpu, non_blocking=True)
             batch_view2 = batch_view2.cuda(args.gpu, non_blocking=True)
 
-        if args.use_amp:
-            with autocast():
-                out1, out2 = model(view1=batch_view1, view2=batch_view2)
-                loss = criterion(out1, out2)
-        else:
+        with autocast(enabled=args.use_amp):
             out1, out2 = model(view1=batch_view1, view2=batch_view2)
             loss = criterion(out1, out2)
 
@@ -453,13 +446,9 @@ def train(train_loader, model, scaler, criterion, optimizer, lr_schedule, epoch,
         top5.update(acc5[0], out2[0].size(0))
 
         # compute gradient and do SGD step
-        if args.use_amp:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
