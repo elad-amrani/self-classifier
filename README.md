@@ -67,6 +67,18 @@ For training any of the ablation study runs presented in the paper, run:
 
 Download pretrained 100/800 epochs models [here](https://drive.google.com/drive/folders/1Jnr2S6ADn3-m5wfd-MZO29A_2FUdS3KD?usp=sharing).
 
+## Qualitative Examples (classes predicted by Self-Classifier on ImageNet validation set)
+
+<img src="graphics/grid_0.jpg" width="18%"> <img src="graphics/grid_1.jpg" width="18%"> <img src="graphics/grid_2.jpg" width="18%"> <img src="graphics/grid_3.jpg" width="18%"> <img src="graphics/grid_4.jpg" width="18%">
+<img src="graphics/grid_5.jpg" width="18%"> <img src="graphics/grid_6.jpg" width="18%"> <img src="graphics/grid_7.jpg" width="18%"> <img src="graphics/grid_8.jpg" width="18%"> <img src="graphics/grid_9.jpg" width="18%">
+<img src="graphics/grid_10.jpg" width="18%"> <img src="graphics/grid_11.jpg" width="18%"> <img src="graphics/grid_12.jpg" width="18%"> <img src="graphics/grid_13.jpg" width="18%"> <img src="graphics/grid_14.jpg" width="18%">
+
+**Low entropy classes predicted by Self-Classifier on ImageNet validation set**. Images are sampled randomly from each predicted class. Note that the predicted classes capture a large variety of different backgrounds and viewpoints.
+
+To reproduce qualitative examples, run:
+
+        sbatch ./scripts/cls_eval.sh
+
 ## License
 
 See the [LICENSE](./LICENSE) file for more details.
