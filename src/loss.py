@@ -1,39 +1,50 @@
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+import utils
 
 
 class Loss(nn.Module):
-    def __init__(self, normalize_rows=False):
+    def __init__(self, row_tau=0.1, col_tau=0.1, eps=1e-8):
         super(Loss, self).__init__()
-        self.normalize_rows = normalize_rows
+        self.row_tau = row_tau
+        self.col_tau = col_tau
+        self.eps = eps
 
-    def forward(self, all_out1, all_out2):
-        loss = 0.0
-        for idx, (out1, out2) in enumerate(zip(all_out1, all_out2)):
-            softmax_view1_col = F.softmax(out1.clone(), dim=0)
-            softmax_view2_col = F.softmax(out2.clone(), dim=0)
+    def forward(self, out):
+        total_loss = 0.0
+        num_loss_terms = 0
 
-            if self.normalize_rows:
-                softmax_view1_col = F.normalize(softmax_view1_col, p=1, dim=1)
-                softmax_view2_col = F.normalize(softmax_view2_col, p=1, dim=1)
+        for cls_idx, cls_out in enumerate(out):  # classifiers
+            # gather samples from all workers
+            cls_out = [utils.AllGather.apply(x).float() for x in cls_out]
 
-            log_softmax_view1_row = F.log_softmax(out1, dim=1)
-            log_softmax_view2_row = F.log_softmax(out2, dim=1)
+            const = cls_out[0].shape[0] / cls_out[0].shape[1]
+            target = []
 
-            # cross entropy
-            loss_view1 = -1.0 * (softmax_view1_col * log_softmax_view2_row).sum() / softmax_view1_col.shape[0]
-            loss_view2 = -1.0 * (softmax_view2_col * log_softmax_view1_row).sum() / softmax_view2_col.shape[0]
-            loss_i = 0.5 * (loss_view1 + loss_view2)
+            for view_i_idx, view_i in enumerate(cls_out):
+                view_i_target = F.softmax(view_i / self.col_tau, dim=0)
+                view_i_target = utils.keep_current(view_i_target)
+                view_i_target = F.normalize(view_i_target, p=1, dim=1, eps=self.eps)
+                target.append(view_i_target)
 
-            loss += loss_i
+            for view_j_idx, view_j in enumerate(cls_out):  # view j
+                view_j_pred = F.softmax(view_j / self.row_tau, dim=1)
+                view_j_pred = F.normalize(view_j_pred, p=1, dim=0, eps=self.eps)
+                view_j_pred = utils.keep_current(view_j_pred)
+                view_j_log_pred = th.log(const * view_j_pred + self.eps)
 
-            # # debug
-            # if idx == 0:
-            #     target = all_out2[idx].argmax(dim=1)
-            #     print('number of unique assignments (cls {}): {}'.format(idx, th.unique(target).shape[0]))
-            #     print('loss_0', loss_i)
+                for view_i_idx, view_i_target in enumerate(target):
 
-        loss /= len(all_out1)
+                    if view_i_idx == view_j_idx or (view_i_idx >= 2 and view_j_idx >= 2):
+                        # skip cases when it's the same view, or when both views are 'local' (small)
+                        continue
 
-        return loss
+                    # cross entropy
+                    loss_i_j = - th.mean(th.sum(view_i_target * view_j_log_pred, dim=1))
+                    total_loss += loss_i_j
+                    num_loss_terms += 1
+
+        total_loss /= num_loss_terms
+
+        return total_loss

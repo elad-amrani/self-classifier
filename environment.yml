@@ -15,4 +15,4 @@ dependencies:
 - torchvision=0.8.2=py38_cu110
 - cudatoolkit=11.0.3=h15472ef_6
 - pip:
-    - tensorboard==2.4.1
+    - robustness==1.2.1.post2

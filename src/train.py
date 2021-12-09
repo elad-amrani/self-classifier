@@ -6,9 +6,6 @@ import time
 import warnings
 import utils
 import sys
-import math
-import functools
-import numpy as np
 
 import torch
 import torch.nn.parallel
@@ -18,10 +15,8 @@ import torch.optim
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.transforms as transforms
-import torchvision.models as models
-import torchvision.datasets as datasets
-from torch.utils.tensorboard import SummaryWriter
+import torchvision.models as torchvision_models
+import numpy as np
 from torch.cuda.amp import GradScaler
 from torch.cuda.amp import autocast
 from apex import parallel
@@ -29,16 +24,12 @@ from apex.parallel.LARC import LARC
 
 from model import Model
 from loss import Loss
+import vit as vits
 
-from sklearn.metrics import normalized_mutual_info_score as nmi
-from sklearn.metrics import adjusted_mutual_info_score as adjusted_nmi
-from sklearn.metrics import adjusted_rand_score as adjusted_rand_index
-
-
-model_names = sorted(name for name in models.__dict__
+torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
-    and callable(models.__dict__[name]))
-print = functools.partial(print, flush=True)
+    and callable(torchvision_models.__dict__[name]))
+model_names = ['vit_tiny', 'vit_small', 'vit_base', 'deit_tiny', 'deit_small'] + torchvision_archs
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Self-Supervised Training')
 parser.add_argument('data', metavar='DIR',
@@ -65,8 +56,8 @@ parser.add_argument('--lr', '--learning-rate', default=4.8, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--start-warmup', default=0.3, type=float,
                     help='initial warmup learning rate')
-parser.add_argument('--final-lr', default=0.0048, type=float,
-                    help='final learning rate')
+parser.add_argument('--final-lr', default=None, type=float,
+                    help='final learning rate (None for constant learning rate)')
 parser.add_argument('--cos', action='store_true',
                     help='use cosine lr schedule')
 parser.add_argument('--sgd', action='store_true',
@@ -78,12 +69,10 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
 parser.add_argument('--wd', '--weight-decay', default=1e-6, type=float,
                     metavar='W', help='weight decay (default: 1e-6)',
                     dest='weight_decay')
-parser.add_argument('-p', '--print-freq', default=10, type=int,
-                    metavar='N', help='print frequency (default: 10)')
+parser.add_argument('-p', '--print-freq', default=16, type=int,
+                    metavar='N', help='print frequency (default: 16)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
-parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
-                    help='evaluate self-supervised classification on the validation set')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
@@ -92,7 +81,7 @@ parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
-parser.add_argument('--seed', default=None, type=int,
+parser.add_argument('--seed', default=0, type=int,
                     help='seed for initializing training. ')
 parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
@@ -101,36 +90,70 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
-parser.add_argument('--cls-size', default=3000, type=int, metavar='CLS',
-                    help='size of classification layer')
-parser.add_argument('--num-cls', default=10, type=int, metavar='NCLS',
+parser.add_argument('--cls-size', type=int, default=[1000], nargs='+',
+                    help='size of classification layer. can be a list if cls-size > 1')
+parser.add_argument('--num-cls', default=1, type=int, metavar='NCLS',
                     help='number of classification layers')
 parser.add_argument('--save-path', default='../saved/', type=str,
                     help='save path for checkpoints')
-parser.add_argument('--use-aug', action='store_true',
-                    help='Use special augmentations (color jitter, grayscale and Gaussian blur)')
 parser.add_argument('--pretrained', default=None, type=str,
                     help='path to pretrained checkpoint')
+parser.add_argument('--rm-pretrained-cls', action='store_true',
+                    help='ignore classifier when loading pretrained model (used for initializing imagenet subset)')
+parser.add_argument('--queue-len', default=262144, type=int,
+                    help='length of nearest neighbor queue')
 parser.add_argument('--dim', default=128, type=int, metavar='DIM',
                     help='size of MLP embedding layer')
-parser.add_argument('--hidden-dim', default=2048, type=int, metavar='HDIM',
+parser.add_argument('--hidden-dim', default=4096, type=int, metavar='HDIM',
                     help='size of MLP hidden layer')
-parser.add_argument('--num-hidden', default=1, type=int,
-                    help='number of MLP hidden layers (1 or 2 only)')
-parser.add_argument('--subset-size', default=-1, type=int,
-                    help='train on only subset-size number of samples. set -1 for entire dataset')
-parser.add_argument('--tau', default=0.1, type=float,
-                    help='softmax temperature (default: 0.1)')
+parser.add_argument('--num-hidden', default=3, type=int,
+                    help='number of MLP hidden layers')
+parser.add_argument('--row-tau', default=0.1, type=float,
+                    help='row softmax temperature (default: 0.1)')
+parser.add_argument('--col-tau', default=0.05, type=float,
+                    help='column softmax temperature (default: 0.05)')
 parser.add_argument('--use-amp', action='store_true',
                     help='use automatic mixed precision')
 parser.add_argument("--syncbn_process_group_size", default=0, type=int,
                     help='process group size for syncBN layer')
 parser.add_argument('--use-lsf-env', action='store_true',
                     help='use LSF env variables')
-parser.add_argument('--no-mlp', action='store_true',
-                    help='do not use MLP')
-parser.add_argument('--learnable-cls', action='store_true',
-                    help='require gradient for classifier (default: fixed orthogonal classifiers)')
+parser.add_argument('--use-bn', action='store_true',
+                    help='use batch normalization layers in MLP')
+parser.add_argument('--fixed-cls', action='store_true',
+                    help='use a fixed classifier')
+parser.add_argument('--global-crops-scale', type=float, nargs='+', default=(0.4, 1.),
+                    help="""Scale range of the cropped image before resizing, relatively to the origin image.
+                    Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we 
+                    recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
+parser.add_argument('--local-crops-number', type=int, default=6,
+                    help="""Number of small local views to generate. 
+                    Set this parameter to 0 to disable multi-crop training. 
+                    When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
+parser.add_argument('--local-crops-scale', type=float, nargs='+', default=(0.05, 0.4),
+                    help="""Scale range of the cropped image before resizing, relatively to the origin image. 
+                    Used for small local view cropping of multi-crop.""")
+parser.add_argument('--patch-size', default=16, type=int,
+                    help="""Size in pixels of input square patches - default 16 (for 16x16 patches). Using smaller 
+                    values leads to better performance but requires more memory. 
+                    Applies only for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling 
+                    mixed precision training to avoid unstabilities.""")
+parser.add_argument('--clip-grad', type=float, default=0.0,
+                    help="""Maximal parameter gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can 
+                    help optimization for larger ViT architectures. 0 for disabling.""")
+parser.add_argument('--no-nn-aug', action='store_true',
+                    help='do not use nearest neighbor augmentation')
+parser.add_argument('--no-bias-wd', action='store_true',
+                    help='do not regularize biases nor Norm parameters')
+parser.add_argument('--bbone-wd', type=float, default=None,
+                    help='backbone weight decay. if set to None weight_decay is used for backbone as well.')
+parser.add_argument('--eps', type=float, default=1e-12,
+                    help='small value to avoid division by zero and log(0)')
+parser.add_argument('--subset-file', default=None, type=str,
+                    help='path to imagenet subset txt file')
+parser.add_argument('--no-leaky', action='store_true',
+                    help='use regular relu layers instead of leaky relu in MLP')
+
 
 def main():
     args = parser.parse_args()
@@ -138,15 +161,10 @@ def main():
     # create output directory
     os.makedirs(args.save_path, exist_ok=True)
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        cudnn.deterministic = True
-        warnings.warn('You have chosen to seed training. '
-                      'This will turn on the CUDNN deterministic setting, '
-                      'which can slow down your training considerably! '
-                      'You may see unexpected behavior when restarting '
-                      'from checkpoints.')
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
 
     if args.gpu is not None:
         warnings.warn('You have chosen a specific GPU. This will completely '
@@ -159,9 +177,7 @@ def main():
     args.is_slurm_job = "SLURM_JOB_ID" in os.environ
     if args.is_slurm_job:
         args.rank = int(os.environ["SLURM_PROCID"])
-        args.world_size = int(os.environ["SLURM_NNODES"]) * int(
-            os.environ["SLURM_TASKS_PER_NODE"][0]
-        )
+        args.world_size = int(os.environ["SLURM_NNODES"]) * int(os.environ["SLURM_TASKS_PER_NODE"][0])
         args.gpu = args.rank % torch.cuda.device_count()
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
@@ -196,7 +212,7 @@ def main_worker(gpu, ngpus_per_node, args):
             dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                     rank=args.rank, world_size=args.world_size)
 
-    # save log only for rank 0
+    # save log only for master process
     if args.rank == 0 or not args.distributed:
         sys.stdout = utils.PrintMultiple(sys.stdout, open(os.path.join(args.save_path, 'log.txt'), 'a+'))
 
@@ -206,19 +222,31 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # create model
     print("=> creating model '{}'".format(args.arch))
-    model = Model(base_model=models.__dict__[args.arch],
+    if args.arch in vits.__dict__.keys():
+        base_model = vits.__dict__[args.arch](patch_size=args.patch_size)
+        backbone_dim = base_model.embed_dim
+    elif args.arch in torchvision_models.__dict__.keys():
+        base_model = torchvision_models.__dict__[args.arch]()
+        backbone_dim = base_model.fc.weight.shape[1]
+    else:
+        raise Exception("Unknown architecture: {}".format(args.arch))
+    model = Model(base_model=base_model,
                   dim=args.dim,
                   hidden_dim=args.hidden_dim,
                   cls_size=args.cls_size,
-                  tau=args.tau,
                   num_cls=args.num_cls,
-                  no_mlp=args.no_mlp,
                   num_hidden=args.num_hidden,
-                  learnable_cls=args.learnable_cls)
+                  use_bn=args.use_bn,
+                  backbone_dim=backbone_dim,
+                  fixed_cls=args.fixed_cls,
+                  no_leaky=args.no_leaky)
     if args.distributed:
         process_group = parallel.create_syncbn_process_group(args.syncbn_process_group_size)
-        model = parallel.convert_syncbn_model(model, process_group=process_group)
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model, process_group=process_group)
     print(model)
+
+    # nearest neighbor queue
+    nn_queue = utils.NNQueue(args.queue_len, args.dim, args.gpu)
 
     # load from pre-trained, before DistributedDataParallel constructor
     if args.pretrained is not None:
@@ -229,15 +257,20 @@ def main_worker(gpu, ngpus_per_node, args):
             # load state dictionary
             state_dict = checkpoint['state_dict']
 
-            # remove module. prefix
             for k in list(state_dict.keys()):
-                if k.startswith('module.'):
+                # remove classifier if necessary
+                if args.rm_pretrained_cls and 'cls_' in k:
+                    del state_dict[k]
+
+                # remove module. prefix
+                elif k.startswith('module.'):
                     # remove prefix
                     state_dict[k[len("module."):]] = state_dict[k]
                     del state_dict[k]
 
             args.start_epoch = 0
-            model.load_state_dict(state_dict)
+            msg = model.load_state_dict(state_dict, strict=False)
+            assert len(msg.missing_keys) == 0, "missing_keys: {}".format(msg.missing_keys)
             print("=> loaded pre-trained model '{}'".format(args.pretrained))
         else:
             print("=> no checkpoint found at '{}'".format(args.pretrained))
@@ -274,21 +307,22 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
-    criterion = Loss().cuda(args.gpu)
+    criterion = Loss(row_tau=args.row_tau, col_tau=args.col_tau, eps=args.eps).cuda(args.gpu)
+    params_groups = utils.get_params_groups(model, args)
     if args.sgd:
-        optimizer = torch.optim.SGD(model.parameters(), args.lr,
+        optimizer = torch.optim.SGD(params_groups, args.lr,
                                     momentum=args.momentum,
                                     weight_decay=args.weight_decay)
     else:
-        optimizer = torch.optim.Adam(model.parameters(), args.lr,
-                                     weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(params_groups, args.lr,
+                                      weight_decay=args.weight_decay)
 
     if args.lars:
         optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
 
     # optionally resume from a checkpoint
     last_model_path = os.path.join(args.save_path, 'model_last.pth.tar')
-    if not args.resume and os.path.isfile(last_model_path):
+    if not args.resume and os.path.isfile(last_model_path):  # automatic resume
         args.resume = last_model_path
     if args.resume:
         if os.path.isfile(args.resume):
@@ -301,6 +335,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 checkpoint = torch.load(args.resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             best_loss = checkpoint['best_loss']
+            nn_queue = checkpoint['nn_queue']
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})"
@@ -311,81 +346,34 @@ def main_worker(gpu, ngpus_per_node, args):
 
     cudnn.benchmark = True
 
-    # Data loading code
+    # data loading code
     traindir = os.path.join(args.data, 'train')
-    valdir = os.path.join(args.data, 'val')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    transform = utils.DataAugmentation(args.global_crops_scale, args.local_crops_scale, args.local_crops_number)
+    dataset = utils.ImageFolderWithIndices(traindir, transform=transform)
+    if args.subset_file is not None:
+        dataset = utils.imagenet_subset(dataset, args.subset_file)
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset) if args.distributed else None
+    loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=(sampler is None),
+                                         num_workers=args.workers, pin_memory=True, sampler=sampler, drop_last=True)
 
-    if args.use_aug:
-        print('=> using special augmentations.')
-        train_augmentations = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-            transforms.RandomApply([
-                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([utils.GaussianBlur([.1, 2.])], p=0.5),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ])
-    else:
-        train_augmentations = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ])
+    # schedulers
+    lr_schedule = utils.cosine_scheduler_with_warmup(base_value=args.lr,
+                                                     final_value=args.final_lr,
+                                                     epochs=args.epochs,
+                                                     niter_per_ep=len(loader),
+                                                     warmup_epochs=args.warmup_epochs,
+                                                     start_warmup_value=args.start_warmup)
 
-    train_dataset = utils.SscDataset(root_dir=traindir,
-                                     transform=train_augmentations,
-                                     size=args.subset_size)
+    # mixed precision
+    scaler = GradScaler(enabled=args.use_amp, init_scale=2. ** 14)
 
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
-
-    val_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
-
-    if args.evaluate:
-        validate(val_loader, model, args)
-        return
-
-    # scheduler (taken from SwAV)
-    warmup_lr_schedule = np.linspace(args.start_warmup, args.lr, len(train_loader) * args.warmup_epochs)
-    iters = np.arange(len(train_loader) * (args.epochs - args.warmup_epochs))
-    args.final_lr = args.final_lr if args.cos else args.lr
-    cosine_lr_schedule = np.array([args.final_lr + 0.5 * (args.lr - args.final_lr) *
-                                   (1 + math.cos(math.pi * t / (len(train_loader) * (args.epochs - args.warmup_epochs))))
-                                   for t in iters])
-    lr_schedule = np.concatenate((warmup_lr_schedule, cosine_lr_schedule))
-
-    # tensorboard writer
-    if args.rank == 0 or not args.distributed:
-        writer = SummaryWriter(log_dir=args.save_path)
-
-    scaler = GradScaler(enabled=args.use_amp)
-
+    # training loop
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            train_sampler.set_epoch(epoch)
+            sampler.set_epoch(epoch)
 
         # train for one epoch
-        loss_i, acc1 = train(train_loader, model, scaler, criterion, optimizer, lr_schedule, epoch, args)
+        loss_i, acc1 = train(loader, model, nn_queue, scaler, criterion, optimizer, lr_schedule, epoch, args)
 
         # remember best acc@1 and save checkpoint
         is_best = True if epoch == 0 else loss_i < best_loss
@@ -397,118 +385,102 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_loss': best_loss,
+                'nn_queue': nn_queue,
                 'optimizer': optimizer.state_dict(),
-            }, is_best=is_best, is_milestone=(epoch + 1) % 50 == 0,
+            }, is_best=is_best, is_milestone=(epoch + 1) % 25 == 0,
                 filename=os.path.join(args.save_path, 'model_last.pth.tar'))
 
-            # write tensorboard
-            writer.add_scalar('Loss', loss_i, epoch)
-            writer.add_scalar('Top1 Accuracy', acc1, epoch)
 
-
-def train(train_loader, model, scaler, criterion, optimizer, lr_schedule, epoch, args):
+def train(loader, model, nn_queue, scaler, criterion, optimizer, lr_schedule, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.6f')
-    top5 = AverageMeter('Acc@5', ':6.6f')
     progress = ProgressMeter(
-        len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        len(loader),
+        [batch_time, data_time, losses, top1],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
     model.train()
 
     end = time.time()
-    for i, (batch_view1, batch_view2, _) in enumerate(train_loader):
+    for i, (images, targets, indices) in enumerate(loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        # update learning rate
-        adjust_learning_rate(optimizer, lr_schedule, iteration=epoch * len(train_loader) + i)
+        if args.cos:
+            # update learning rate
+            adjust_lr(optimizer, lr_schedule, iteration=epoch * len(loader) + i)
 
         optimizer.zero_grad()
 
-        if args.gpu is not None:
-            batch_view1 = batch_view1.cuda(args.gpu, non_blocking=True)
-            batch_view2 = batch_view2.cuda(args.gpu, non_blocking=True)
+        if torch.cuda.is_available():
+            images = [x.cuda(args.gpu, non_blocking=True) for x in images]
+            targets = targets.cuda(args.gpu, non_blocking=True)  # only used for monitoring progress, NOT for training
+            indices = indices.cuda(args.gpu, non_blocking=True)
 
         with autocast(enabled=args.use_amp):
-            out1, out2 = model(view1=batch_view1, view2=batch_view2)
-            loss = criterion(out1, out2)
+            # compute embeddings
+            embds = model(images, return_embds=True)
 
-        # measure accuracy and record loss
-        target = out2[0].clone().detach().argmax(dim=1)
-        acc1, acc5 = accuracy(out1[0], target, topk=(1, 5))
-        losses.update(loss.item(), out2[0].size(0))
-        top1.update(acc1[0], out2[0].size(0))
-        top5.update(acc5[0], out2[0].size(0))
+            # view1 embeddings
+            embds1 = embds[0].clone().detach()
+
+            if nn_queue.full:
+                if not args.no_nn_aug:  # if queue is full and nn is enabled, replace view1 with view1-nn
+                    embds[0], nn_targets = nn_queue.get_nn(embds1, indices)
+                else:  # if nn augmentation is disabled do not replace, but use for monitoring progress
+                    _, nn_targets = nn_queue.get_nn(embds1, indices)
+
+                # measure accuracy of nearest neighbor (for monitoring progress)
+                acc1 = (targets.view(-1, ) == nn_targets.view(-1, )).float().mean().view(1, ) * 100.0
+                # compute accuracy of all workers
+                acc1 = utils.AllGather.apply(acc1).mean()
+                top1.update(acc1, targets.size(0))
+
+            # gather embeddings, targets and indices from all workers
+            embds1 = utils.AllGather.apply(embds1)
+            targets = utils.AllGather.apply(targets)
+            indices = utils.AllGather.apply(indices)
+
+            # push embeddings of view1 (all workers) into queue
+            nn_queue.push(embds1, targets, indices)
+
+            # compute probs
+            probs = model(embds, return_embds=False)
+
+            with autocast(enabled=False):
+                # compute loss
+                loss = criterion(probs)
+
+        assert not torch.isnan(loss), 'loss is nan!'
 
         # compute gradient and do SGD step
         scaler.scale(loss).backward()
+        if args.clip_grad:
+            scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
+            _ = utils.clip_gradients(model, args.clip_grad)
         scaler.step(optimizer)
         scaler.update()
+
+        # record loss
+        loss = loss.detach() / dist.get_world_size()
+        dist.all_reduce(loss)  # compute mean over all workers
+        losses.update(loss.item(), probs[0][0].size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
         if i % args.print_freq == args.print_freq - 1:
+            # debug
+            target = probs[0][1].clone().detach().argmax(dim=1)
+            unique_predictions = torch.unique(utils.AllGather.apply(target)).shape[0]
+            print('number of unique predictions (cls {}): {}'.format(0, unique_predictions))
             progress.display(i)
 
     return losses.avg, top1.avg
-
-
-def validate(val_loader, model, args):
-    all_preds = np.zeros((len(val_loader.dataset.targets), ), dtype=int)
-    all_targets = np.zeros((len(val_loader.dataset.targets), ), dtype=int)
-    batch_time = AverageMeter('Time', ':6.3f')
-    progress = ProgressMeter(
-        len(val_loader),
-        [batch_time],
-        prefix='Test: ')
-
-    # switch to evaluate mode
-    model.eval()
-
-    idx = 0
-    with torch.no_grad():
-        end = time.time()
-        for i, (images, targets) in enumerate(val_loader):
-            if args.gpu is not None:
-                images = images.cuda(args.gpu, non_blocking=True)
-
-            # compute output
-            output = model(images)
-
-            num_samples = output.shape[0]
-
-            # save target
-            all_targets[idx: idx + num_samples] = targets.numpy()
-
-            # compute prediction
-            all_preds[idx: idx + num_samples] = output.clone().detach().argmax(dim=1).cpu().numpy()
-
-            idx += num_samples
-
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
-
-            if i % args.print_freq == 0:
-                progress.display(i)
-
-    # compute various measurements
-    val_nmi = nmi(all_targets, all_preds)
-    val_adjusted_nmi = adjusted_nmi(all_targets, all_preds)
-    val_adjusted_rand_index = adjusted_rand_index(all_targets, all_preds)
-    print('=> number of samples: {}'.format(len(all_targets)))
-    print('=> NMI: {:.3f}%'.format(val_nmi * 100.0))
-    print('=> Adjusted NMI: {:.3f}%'.format(val_adjusted_nmi * 100.0))
-    print('=> Adjusted Rand-Index: {:.3f}%'.format(val_adjusted_rand_index * 100.0))
-
-    return
 
 
 def save_checkpoint(state, is_best, is_milestone, filename):
@@ -559,25 +531,8 @@ class ProgressMeter(object):
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
 
-def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
-
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-        res = []
-        for k in topk:
-            correct_k = correct[:k].reshape(-1, ).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
-
-
-def adjust_learning_rate(optimizer, lr_schedule, iteration):
-    for param_group in optimizer.param_groups:
+def adjust_lr(optimizer, lr_schedule, iteration):
+    for idx, param_group in enumerate(optimizer.param_groups):
         param_group['lr'] = lr_schedule[iteration]
 
 
