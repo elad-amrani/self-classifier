@@ -1,6 +1,6 @@
 # Self-Classifier: Self-Supervised Classification Network
 
-Official PyTorch implementation and pretrained models of the paper [Self-Supervised Classification Network](https://arxiv.org/abs/2103.10994).
+Official PyTorch implementation and pretrained models of the paper [Self-Supervised Classification Network](https://arxiv.org/abs/2103.10994) from ECCV 2022.
 
 <p align="center">
 <img src="graphics/Self-Classifier_arch.jpg" width="65%">
